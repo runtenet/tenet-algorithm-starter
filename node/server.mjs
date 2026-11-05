@@ -21,6 +21,16 @@ function fromTenet(rawBody, timestamp, signature) {
   return want.length === got.length && timingSafeEqual(want, got);
 }
 
+const seen = new Map(); // signature -> when it was first seen: a question that was already answered is not answered again
+/** True the first time a valid signature shows up, false for a replay inside the 5-minute window. */
+function firstTime(signature) {
+  const now = Date.now();
+  for (const [s, t] of seen) if (now - t > 330_000) seen.delete(s);
+  if (seen.has(signature)) return false;
+  seen.set(signature, now);
+  return true;
+}
+
 // ---------------------------------------------------------------- your strategy
 
 const DIP_PCT = 1.5; // buy a stock that is this many percent under the highest price this server has seen
@@ -67,13 +77,19 @@ createServer((req, res) => {
     if (!fromTenet(raw, req.headers["x-tenet-timestamp"], req.headers["x-tenet-signature"])) {
       return void res.writeHead(401).end("not from TENET");
     }
+    if (!firstTime(req.headers["x-tenet-signature"])) return void res.writeHead(409).end("already answered");
     let question;
     try {
       question = JSON.parse(raw);
     } catch {
       return void res.writeHead(400).end("bad json");
     }
-    const orders = decide(question).slice(0, 3); // TENET takes at most 3 orders per question
+    let orders;
+    try {
+      orders = decide(question).slice(0, 3);
+    } catch {
+      return void res.writeHead(400).end("could not read the question"); // a signed but odd question must not crash the server
+    } // TENET takes at most 3 orders per question
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ orders }));
   });

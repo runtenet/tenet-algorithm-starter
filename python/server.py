@@ -31,6 +31,20 @@ def from_tenet(raw_body: str, timestamp: str, signature: str) -> bool:
     return hmac.compare_digest(want, signature or "")
 
 
+seen = {}  # signature -> when it was first seen: a question that was already answered is not answered again
+
+
+def first_time(signature: str) -> bool:
+    """True the first time a valid signature shows up, False for a replay inside the 5-minute window."""
+    now = time.time()
+    for k in [k for k, t in seen.items() if now - t > 330]:
+        del seen[k]
+    if signature in seen:
+        return False
+    seen[signature] = now
+    return True
+
+
 # ---------------------------------------------------------------- your strategy
 
 DIP_PCT = 1.5  # buy a stock that is this many percent under the highest price this server has seen
@@ -77,7 +91,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"ok")
 
     def do_POST(self):
-        size = int(self.headers.get("content-length") or 0)
+        try:
+            size = int(self.headers.get("content-length") or 0)
+        except ValueError:
+            size = -1
+        if size < 0:
+            self.send_response(400)
+            self.end_headers()
+            return
         if size > 100_000:  # a question is small: refuse a huge body
             self.send_response(413)
             self.end_headers()
@@ -88,13 +109,24 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"not from TENET")
             return
+        if not first_time(self.headers.get("x-tenet-signature")):
+            self.send_response(409)
+            self.end_headers()
+            self.wfile.write(b"already answered")
+            return
         try:
             question = json.loads(raw)
         except json.JSONDecodeError:
             self.send_response(400)
             self.end_headers()
             return
-        orders = decide(question)[:3]  # TENET takes at most 3 orders per question
+        try:
+            orders = decide(question)[:3]  # TENET takes at most 3 orders per question
+        except Exception:  # a signed but odd question must not crash the server
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"could not read the question")
+            return
         body = json.dumps({"orders": orders}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
